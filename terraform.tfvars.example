@@ -1,0 +1,5 @@
+aws_region         = "us-east-1"
+project_name       = "music-streaming-etl"
+bucket_name        = null
+upload_sample_data = true
+local_data_dir     = "./data"
