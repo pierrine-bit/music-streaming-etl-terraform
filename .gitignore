@@ -1,5 +1,16 @@
+# Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
-.terraform.lock.hcl
-archive_files.zip
+crash.log
+terraform.tfvars
+
+# IDE
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# AWS
+*.pem
