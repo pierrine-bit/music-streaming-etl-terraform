@@ -1,0 +1,109 @@
+name: Terraform
+
+# Two ways to run:
+#   * Pull request to main  -> quality gate + speculative `plan`.
+#   * "Run workflow" button  -> pick plan / apply / destroy manually.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to run"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write # assume the AWS role via OIDC
+  contents: read
+
+env:
+  TF_VERSION: "1.15.7" # must match the local version that wrote the state
+  AWS_REGION: eu-west-1
+  TF_VAR_aws_region: eu-west-1
+  TF_INPUT: "false"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Quality gate: runs without AWS credentials, so it's fast and safe on forks.
+  # Unit tests, formatting, lint, and IaC security scanning.
+  # ---------------------------------------------------------------------------
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests (pytest)
+        run: pytest -q
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: tflint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+      - run: tflint --init
+      - run: tflint --recursive -f compact
+
+      - name: Checkov (IaC security scan)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          quiet: true
+          soft_fail: true # report findings without failing the build; triage separately
+
+  # ---------------------------------------------------------------------------
+  # Terraform: needs AWS. Runs plan on PRs, or the chosen action on dispatch.
+  # apply/destroy pause for approval via the `production` environment.
+  # ---------------------------------------------------------------------------
+  terraform:
+    needs: quality
+    runs-on: ubuntu-latest
+    environment: ${{ (github.event_name == 'workflow_dispatch' && (inputs.action == 'apply' || inputs.action == 'destroy')) && 'production' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        if: github.event_name == 'pull_request' || inputs.action == 'plan'
+        run: terraform plan -no-color -lock-timeout=5m
+
+      - name: Terraform apply
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+        run: terraform apply -auto-approve -no-color -lock-timeout=5m
+
+      - name: Terraform destroy
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+        run: terraform destroy -auto-approve -no-color -lock-timeout=5m

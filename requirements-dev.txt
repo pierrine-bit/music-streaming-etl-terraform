@@ -1,0 +1,4 @@
+# Local + CI test dependencies for the Glue Python Shell job logic.
+# (PySpark/awsglue are provided by the Glue runtime and are not unit-tested here.)
+pytest>=8.0
+boto3>=1.34
