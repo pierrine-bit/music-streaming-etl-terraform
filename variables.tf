@@ -39,3 +39,21 @@ variable "glue_number_of_workers" {
   type        = number
   default     = 2
 }
+
+variable "alert_email" {
+  description = "Email address to subscribe to pipeline failure alerts. Leave null to skip the SNS subscription."
+  type        = string
+  default     = null
+}
+
+variable "top_n_songs" {
+  description = "Number of top songs to rank per genre per day."
+  type        = number
+  default     = 3
+}
+
+variable "top_n_genres" {
+  description = "Number of top genres to rank per day."
+  type        = number
+  default     = 5
+}

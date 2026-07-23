@@ -4,6 +4,10 @@
 *.tfstate.*
 crash.log
 terraform.tfvars
+backend.tf.disabled
+
+# Generated Lambda deployment package
+archive_files.zip
 
 # IDE
 .vscode/

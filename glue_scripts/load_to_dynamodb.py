@@ -50,15 +50,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--processed_prefix", required=True)
+    parser.add_argument("--genre_kpis_prefix", required=True)
+    parser.add_argument("--top_songs_prefix", required=True)
+    parser.add_argument("--top_genres_prefix", required=True)
     parser.add_argument("--genre_table", required=True)
     parser.add_argument("--top_songs_table", required=True)
     parser.add_argument("--top_genres_table", required=True)
     args, _ = parser.parse_known_args()
 
     base = args.processed_prefix.rstrip("/")
-    load_table(args.bucket, f"{base}/genre_daily_kpis/", args.genre_table)
-    load_table(args.bucket, f"{base}/top_songs/", args.top_songs_table)
-    load_table(args.bucket, f"{base}/top_genres/", args.top_genres_table)
+    load_table(args.bucket, f"{base}/{args.genre_kpis_prefix}/", args.genre_table)
+    load_table(args.bucket, f"{base}/{args.top_songs_prefix}/", args.top_songs_table)
+    load_table(args.bucket, f"{base}/{args.top_genres_prefix}/", args.top_genres_table)
 
 
 if __name__ == "__main__":

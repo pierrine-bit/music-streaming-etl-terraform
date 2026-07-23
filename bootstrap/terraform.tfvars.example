@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars and fill in, then run the bootstrap once.
+github_repository = "amalitech/music-streaming-etl" # owner/repo of THIS GitHub repository
+aws_region        = "eu-west-1"
+project_name      = "music-streaming-etl"
+# state_bucket_name = "my-custom-tfstate-bucket" # optional; otherwise auto-derived

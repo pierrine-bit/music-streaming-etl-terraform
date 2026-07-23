@@ -1,16 +1,18 @@
-data "aws_iam_policy_document" "glue_assume" {
+data "aws_iam_policy_document" "assume_role" {
+  for_each = local.iam_assume_role_services
+
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
-      identifiers = ["glue.amazonaws.com"]
+      identifiers = [each.value]
     }
   }
 }
 
 resource "aws_iam_role" "glue" {
   name               = "${var.project_name}-glue-role"
-  assume_role_policy = data.aws_iam_policy_document.glue_assume.json
+  assume_role_policy = data.aws_iam_policy_document.assume_role["glue"].json
   tags               = local.common_tags
 }
 
@@ -21,11 +23,32 @@ resource "aws_iam_role_policy_attachment" "glue_service" {
 
 data "aws_iam_policy_document" "glue_inline" {
   statement {
-    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    sid       = "ListPipelineBucket"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.pipeline.arn]
+    # No prefix condition: Spark lists/HEADs root-level directory markers
+    # (e.g. "processed_$folder$") that a prefix-scoped condition would block.
+  }
+
+  statement {
+    sid     = "ReadInputsAndScripts"
+    actions = ["s3:GetObject"]
     resources = [
-      aws_s3_bucket.pipeline.arn,
-      "${aws_s3_bucket.pipeline.arn}/*"
+      "${aws_s3_bucket.pipeline.arn}/${local.reference_prefix}/*",
+      "${aws_s3_bucket.pipeline.arn}/${local.streams_prefix}/*",
+      "${aws_s3_bucket.pipeline.arn}/${local.scripts_prefix}/*",
     ]
+  }
+
+  statement {
+    sid     = "ReadWriteWorkingData"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    # Whole-bucket object access (not just processed/* and tmp/*): Spark/Hadoop
+    # writes zero-byte directory markers such as "processed_$folder$" at the
+    # bucket root, which fall outside a "processed/*" prefix grant. This is a
+    # single-purpose pipeline bucket, so granting object access across it is the
+    # simplest correct scope and avoids marker-by-marker whack-a-mole.
+    resources = ["${aws_s3_bucket.pipeline.arn}/*"]
   }
 
   statement {
@@ -49,19 +72,9 @@ resource "aws_iam_role_policy" "glue_inline" {
   policy = data.aws_iam_policy_document.glue_inline.json
 }
 
-data "aws_iam_policy_document" "lambda_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["lambda.amazonaws.com"]
-    }
-  }
-}
-
 resource "aws_iam_role" "lambda" {
   name               = "${var.project_name}-archive-lambda-role"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+  assume_role_policy = data.aws_iam_policy_document.assume_role["lambda"].json
   tags               = local.common_tags
 }
 
@@ -72,11 +85,30 @@ resource "aws_iam_role_policy_attachment" "lambda_basic" {
 
 data "aws_iam_policy_document" "lambda_s3" {
   statement {
-    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-    resources = [
-      aws_s3_bucket.pipeline.arn,
-      "${aws_s3_bucket.pipeline.arn}/*"
-    ]
+    sid       = "ListPipelinePrefixes"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.pipeline.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values = [
+        "${local.streams_prefix}/*",
+        "${local.archive_prefix}/*",
+      ]
+    }
+  }
+
+  statement {
+    sid       = "ReadAndRemoveSource"
+    actions   = ["s3:GetObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.pipeline.arn}/${local.streams_prefix}/*"]
+  }
+
+  statement {
+    sid       = "WriteArchive"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.pipeline.arn}/${local.archive_prefix}/*"]
   }
 }
 
@@ -86,19 +118,9 @@ resource "aws_iam_role_policy" "lambda_s3" {
   policy = data.aws_iam_policy_document.lambda_s3.json
 }
 
-data "aws_iam_policy_document" "step_functions_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["states.amazonaws.com"]
-    }
-  }
-}
-
 resource "aws_iam_role" "step_functions" {
   name               = "${var.project_name}-sfn-role"
-  assume_role_policy = data.aws_iam_policy_document.step_functions_assume.json
+  assume_role_policy = data.aws_iam_policy_document.assume_role["step_functions"].json
   tags               = local.common_tags
 }
 
@@ -118,6 +140,12 @@ data "aws_iam_policy_document" "step_functions_inline" {
   }
 
   statement {
+    sid       = "PipelineConcurrencyLock"
+    actions   = ["dynamodb:PutItem", "dynamodb:DeleteItem"]
+    resources = [aws_dynamodb_table.pipeline_lock.arn]
+  }
+
+  statement {
     actions   = ["logs:CreateLogDelivery", "logs:GetLogDelivery", "logs:UpdateLogDelivery", "logs:DeleteLogDelivery", "logs:ListLogDeliveries", "logs:PutResourcePolicy", "logs:DescribeResourcePolicies", "logs:DescribeLogGroups"]
     resources = ["*"]
   }
@@ -127,4 +155,23 @@ resource "aws_iam_role_policy" "step_functions_inline" {
   name   = "${var.project_name}-sfn-inline"
   role   = aws_iam_role.step_functions.id
   policy = data.aws_iam_policy_document.step_functions_inline.json
+}
+
+resource "aws_iam_role" "eventbridge_sfn" {
+  name               = "${var.project_name}-eventbridge-sfn-role"
+  assume_role_policy = data.aws_iam_policy_document.assume_role["eventbridge_sfn"].json
+  tags               = local.common_tags
+}
+
+data "aws_iam_policy_document" "eventbridge_sfn_inline" {
+  statement {
+    actions   = ["states:StartExecution"]
+    resources = [aws_sfn_state_machine.pipeline.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "eventbridge_sfn_inline" {
+  name   = "${var.project_name}-eventbridge-sfn-inline"
+  role   = aws_iam_role.eventbridge_sfn.id
+  policy = data.aws_iam_policy_document.eventbridge_sfn_inline.json
 }

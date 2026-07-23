@@ -21,3 +21,7 @@ output "dynamodb_tables" {
     top_genres       = aws_dynamodb_table.top_genres.name
   }
 }
+
+output "pipeline_alerts_topic_arn" {
+  value = aws_sns_topic.pipeline_alerts.arn
+}
