@@ -80,6 +80,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug OIDC subject
+        run: |
+          echo "repository = ${{ github.repository }}"
+          echo "ref        = ${{ github.ref }}"
+          echo "event      = ${{ github.event_name }}"
+          echo "trust expects sub = repo:${{ github.repository }}:* to match repo:pierrine-bit/music-streaming-etl-terraform:*"
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
