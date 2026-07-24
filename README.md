@@ -84,7 +84,7 @@ The tables are keyed around their read patterns, so every lookup is a single-key
 ```
 music-streaming-etl-terraform/
 ├── .github/workflows/terraform.yml   # the CI/CD workflow
-├── bootstrap/                        # one-time setup: state bucket, lock table, OIDC, CI role
+├── bootstrap/
 ├── data/                             # sample CSVs
 ├── examples/                         # sample start-execution payload
 ├── glue_scripts/                     # validate / transform / load
