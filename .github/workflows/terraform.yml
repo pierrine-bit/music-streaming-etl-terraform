@@ -1,8 +1,4 @@
 name: Terraform
-
-# Two ways to run:
-#   * Pull request to main  -> quality gate + speculative `plan`.
-#   * "Run workflow" button  -> pick plan / apply / destroy manually.
 on:
   workflow_dispatch:
     inputs:
@@ -28,10 +24,6 @@ env:
   TF_INPUT: "false"
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Quality gate: no AWS credentials needed, so it runs fast and on its own.
-  # Unit tests, formatting, lint, and IaC security scanning.
-  # ---------------------------------------------------------------------------
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -65,14 +57,11 @@ jobs:
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
+          framework: terraform # scan Terraform only (skips the slow crawl over data/)
           config_file: .checkov.yaml
           quiet: true
-          soft_fail: true # accepted exceptions are in .checkov.yaml; soft_fail keeps any new advisory non-blocking
+          soft_fail: true # non-blocking; exceptions documented in .checkov.yaml
 
-  # ---------------------------------------------------------------------------
-  # Terraform: needs AWS. Runs plan on PRs, or the chosen action on dispatch.
-  # apply/destroy pause for approval via the `production` environment.
-  # ---------------------------------------------------------------------------
   terraform:
     needs: quality
     runs-on: ubuntu-latest
@@ -84,10 +73,7 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      # OIDC is preferred on a persistent account, but the DCE sandbox blocks
-      # federated AssumeRoleWithWebIdentity, so we authenticate with the
-      # sandbox's temporary credentials (stored as GitHub secrets). These are
-      # short-lived — refresh the secrets from the DCE portal before running.
+      # DCE sandbox blocks OIDC federation, so authenticate with short-lived key secrets (refresh before running).
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
