@@ -4,8 +4,6 @@ I built a serverless data pipeline on AWS that transforms raw music-streaming fi
 
 **Built with:** S3, EventBridge, Step Functions, AWS Glue (PySpark + Python Shell), Lambda, DynamoDB, SNS, and CloudWatch.
 
----
-
 ## Architecture
 
 An S3 `Object Created` event on `raw/streams/` starts the pipeline the moment a file lands, so there's no polling or fixed batch window.
@@ -38,8 +36,6 @@ A Step Functions state machine runs the steps in order, retrying a step if it fa
 
 The lock is released on both the success and failure paths, so a failed run never leaves it held.
 
----
-
 ## Input data
 
 Required columns per file:
@@ -49,8 +45,6 @@ Required columns per file:
 | `songs.csv` | `track_id`, `track_name`, `duration_ms`, `track_genre` |
 | `users.csv` | `user_id`, `user_name`, `user_age`, `user_country`, `created_at` |
 | `streams.csv` | `user_id`, `track_id`, `listen_time` |
-
----
 
 ## KPIs
 
@@ -65,8 +59,6 @@ Computed daily, per genre:
 
 A single day's data can arrive across several files. To keep the daily figures correct, the transform job maintains a cumulative store of cleaned events and recomputes the metrics from the full store on every run, so a later file adds to the day's totals rather than overwriting them. Events are partitioned by source file, so reprocessing a file replaces only its own slice instead of double-counting.
 
----
-
 ## Data model
 
 The tables are keyed around their read patterns, so every lookup is a single-key read with no table scans.
@@ -77,29 +69,25 @@ The tables are keyed around their read patterns, so every lookup is a single-key
 | `top-songs-per-genre-daily` | `date_genre` | `rank` | the top 3 songs for a genre on a day |
 | `top-genres-daily` | `listen_date` | `rank` | the top 5 genres for a day |
 
----
-
 ## Project layout
 
 ```
 music-streaming-etl-terraform/
-├── .github/workflows/terraform.yml   # the CI/CD workflow
+├── .github/workflows/terraform.yml   
 ├── bootstrap/
-├── data/                             # sample CSVs
-├── examples/                         # sample start-execution payload
-├── glue_scripts/                     # validate / transform / load
-├── lambda/                           # archive_files.py
-├── tests/                            # unit tests
-├── locals.tf                         # names and prefixes, defined once
+├── data/                            
+├── examples/                         
+├── glue_scripts/                    
+├── lambda/                           
+├── tests/                            
+├── locals.tf                         
 ├── s3.tf  dynamodb.tf  glue.tf  iam.tf  lambda.tf
 ├── step_functions.tf  triggers.tf  alerting.tf  logging.tf
-├── backend.tf  backend.hcl           # S3 remote state
+├── backend.tf  backend.hcl           
 ├── variables.tf  outputs.tf  providers.tf  versions.tf
 ├── pytest.ini  requirements-dev.txt  .tflint.hcl  .checkov.yaml
 └── README.md
 ```
-
----
 
 ## Getting started
 
@@ -125,8 +113,6 @@ Configurable variables (`terraform.tfvars`):
 | `glue_number_of_workers` | `2` | PySpark worker count |
 | `upload_sample_data` | `true` | seed `raw/` with the sample CSVs on apply |
 
----
-
 ## Running the pipeline
 
 With `upload_sample_data = true`, the first apply seeds the data and the pipeline runs automatically. To process new data, upload a file:
@@ -142,8 +128,6 @@ aws stepfunctions start-execution \
   --state-machine-arn $(terraform output -raw state_machine_arn) \
   --input file://examples/start-execution.json
 ```
-
----
 
 ## Querying results
 
@@ -166,8 +150,6 @@ aws dynamodb query \
   --expression-attribute-values '{":d":{"S":"2024-06-25"}}'
 ```
 
----
-
 ## Tests
 
 The Python logic is unit-tested, so it can be verified without AWS or Spark:
@@ -183,45 +165,21 @@ pytest -q
 
 The PySpark job is not unit-tested (it needs the Glue runtime); it is exercised end to end when the pipeline runs.
 
----
-
 ## CI/CD
 
-Terraform owns the infrastructure and a single [terraform.yml](.github/workflows/terraform.yml) workflow runs it. State is held in S3 with DynamoDB locking, so CI and local runs share the same state.
+A single [terraform.yml](.github/workflows/terraform.yml) workflow runs Terraform against S3-backed state with DynamoDB locking.
 
-- On a **pull request**: the checks (`pytest`, `terraform fmt`, `tflint`, Checkov) and a `plan`.
-- From the **Run workflow** button: `plan`, `apply`, or `destroy`. Apply and destroy require approval through the `production` environment.
+- **Pull request** → `pytest`, `fmt`, `tflint`, Checkov, and a `plan`.
+- **Run workflow** → `plan` / `apply` / `destroy`, with apply and destroy gated by the `production` environment.
 
-**Credentials.** The workflow authenticates with short-lived keys stored as GitHub secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), which is what works in the DCE sandbox I built this against. On a persistent account I would use OIDC instead (no stored keys); the `bootstrap/` config already provisions the OIDC provider and CI role, so it only requires switching the auth step to `role-to-assume: ${{ vars.AWS_ROLE_ARN }}`.
-
-Setup is a one-time step. `bootstrap/` creates the state bucket, lock table, OIDC provider, and CI role:
-
-```bash
-cd bootstrap && terraform init && terraform apply     # note the outputs
-cd .. && terraform init -backend-config=backend.hcl -migrate-state
-```
-
-Then, under *Settings → Secrets and variables → Actions*, add the AWS credential secrets (or an `AWS_ROLE_ARN` variable for OIDC) and create a `production` environment with a required reviewer.
-
----
+Actions authenticate via GitHub secrets (OIDC on a persistent account). One-time backend and CI-role setup lives in [bootstrap/](bootstrap/).
 
 ## Operations
 
-**Concurrency.** A run reprocesses everything in `raw/streams/` and then archives it, so the lock prevents overlapping runs. If a run is force-cancelled and leaves the lock in place, remove it manually:
-
-```bash
-aws dynamodb delete-item \
-  --table-name music-streaming-etl-pipeline-lock \
-  --key '{"LockName":{"S":"pipeline"}}'
-```
-
-**Monitoring.** Glue and Lambda log to CloudWatch, Step Functions retains the full execution history, and any failed, timed-out, or aborted run sends an email via SNS (when `alert_email` is set).
-
-**Security.** Data is encrypted at rest (S3, DynamoDB, SNS), the bucket has versioning and blocks public access, and each service has its own least-privilege role. The KPI tables have point-in-time recovery enabled, and there are no long-lived credentials in the design. For the Checkov findings from the CI scan, I fixed the ones worth addressing and documented the exceptions, with reasons, in [.checkov.yaml](.checkov.yaml).
-
-**Cost.** The stack is serverless and scales to zero, so an idle deployment is negligible: DynamoDB and S3 are on-demand, Glue bills only while a job runs, and the rest is minimal. There is no always-on compute.
-
----
+- **Concurrency** — a DynamoDB lock serializes overlapping runs.
+- **Monitoring** — CloudWatch logs, Step Functions execution history, and SNS email alerts on failed runs.
+- **Security** — encryption at rest, least-privilege IAM, DynamoDB PITR, no long-lived credentials; Checkov exceptions in [.checkov.yaml](.checkov.yaml).
+- **Cost** — serverless and scale-to-zero; effectively $0 when idle.
 
 ## Cleanup
 
