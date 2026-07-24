@@ -1,4 +1,4 @@
-"""Unit tests for the archive Lambda's move logic (copy-then-delete, skip markers)."""
+"""Unit tests for the archive Lambda's move logic."""
 import archive_files
 
 

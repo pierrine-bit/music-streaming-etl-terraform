@@ -1,4 +1,4 @@
-"""Unit tests for the validation Glue (Python Shell) job's column checks."""
+"""Unit tests for the validation job's required-column checks."""
 import pytest
 
 import validate_inputs as v

@@ -1,4 +1,4 @@
-
+"""Unit tests for the DynamoDB loader's float-to-Decimal coercion."""
 from decimal import Decimal
 
 import load_to_dynamodb as loader
