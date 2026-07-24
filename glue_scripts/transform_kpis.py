@@ -1,11 +1,17 @@
+"""Glue PySpark job: compute daily genre KPIs from a cumulative event store."""
+import logging
 import sys
 
 import boto3
+from botocore.config import Config
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 args = getResolvedOptions(
     sys.argv,
@@ -23,20 +29,17 @@ args = getResolvedOptions(
     ],
 )
 
-# Redundant/duplicate triggers can fire after a prior run archived the batch.
-# If there are no stream files there is nothing to recompute, so exit cleanly
-# before paying for Spark startup (matches validate_inputs.py's no-op behaviour).
+# No stream files (a duplicate trigger after archival): nothing to do, exit before Spark starts.
 _streams_prefix = args["streams_prefix"].rstrip("/") + "/"
-_listing = boto3.client("s3").list_objects_v2(Bucket=args["bucket"], Prefix=_streams_prefix)
+_s3 = boto3.client("s3", config=Config(retries={"max_attempts": 5, "mode": "standard"}))
+_listing = _s3.list_objects_v2(Bucket=args["bucket"], Prefix=_streams_prefix)
 if not any(obj["Key"].endswith(".csv") for obj in _listing.get("Contents", [])):
-    print(f"No stream CSV files at s3://{args['bucket']}/{_streams_prefix}; nothing to transform.")
+    log.info("No stream CSV files at s3://%s/%s; nothing to transform.", args["bucket"], _streams_prefix)
     sys.exit(0)
 
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-# Only the partitions present in a write are replaced, so appending one batch's
-# events never rewrites (or drops) another batch's partitions.
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
 bucket = args["bucket"]
@@ -80,14 +83,10 @@ new_events = streams_clean.join(songs_clean, on="track_id", how="inner").select(
     "duration_ms",
 )
 
-# --- 2. Append the batch to the cumulative event store. ---
-# Partitioning by source_file makes reprocessing a file idempotent: a retry
-# overwrites that file's partition rather than double-counting its plays.
+# --- 2. Append the batch to the cumulative event store (idempotent per source file). ---
 new_events.write.mode("overwrite").partitionBy("source_file").parquet(events_path)
 
-# --- 3. Recompute daily KPIs from the FULL event history. ---
-# Reading the accumulated store (not just this batch) keeps unique listeners
-# and the top-N rankings correct when a day's data spans multiple batches.
+# --- 3. Recompute the daily KPIs across the full event history. ---
 events = spark.read.parquet(events_path)
 
 base = events.groupBy("listen_date", "track_genre").agg(
@@ -130,8 +129,7 @@ top_genres = (
     .select("listen_date", "rank", "track_genre", "listen_count")
 )
 
-# KPI outputs cover every date in the store, so overwriting the whole prefix is
-# correct (and the DynamoDB load below re-puts each item idempotently).
+# Full recompute, so overwrite the whole output prefix.
 outputs = {
     args["genre_kpis_prefix"]: kpis,
     args["top_songs_prefix"]: top_songs,

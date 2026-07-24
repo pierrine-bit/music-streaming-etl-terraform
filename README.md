@@ -1,435 +1,230 @@
-# Music Streaming ETL Pipeline with Terraform
+# Music Streaming ETL Pipeline
 
-A fully automated AWS ETL pipeline built with **Terraform**, **Amazon S3**, **AWS Glue**, **AWS Step Functions**, **AWS Lambda**, and **Amazon DynamoDB** for processing and analyzing music streaming data.
+I built a serverless data pipeline on AWS that transforms raw music-streaming files into daily, genre-level listening metrics served from DynamoDB. Files arrive in S3 at unpredictable times, and each one triggers the pipeline automatically. The infrastructure is defined entirely in Terraform, with a GitHub Actions workflow for plan and apply.
 
-This project provisions the complete cloud infrastructure and deploys an end-to-end data pipeline that validates incoming streaming data, computes daily KPIs, stores analytical results in DynamoDB, and archives processed files.
+**Built with:** S3, EventBridge, Step Functions, AWS Glue (PySpark + Python Shell), Lambda, DynamoDB, SNS, and CloudWatch.
 
 ---
 
 ## Architecture
 
-```
-                +------------------+
-                |   Streaming CSVs |
-                +---------+--------+
-                          |
-                          v
-                Amazon S3 (raw/streams/)
-                          |
-                          v
-              EventBridge (Object Created)
-                          |
-                          v
-               AWS Step Functions
-                          |
-        +-----------------+----------------+
-        |                 |                |
-        v                 v                v
- Validate Inputs   Transform KPIs   Load DynamoDB
- (Glue Python)    (Glue PySpark)   (Glue Python)
-                          |
-                          v
-                  AWS Lambda Archive
-                          |
-                          v
-                  S3 archive folder
+An S3 `Object Created` event on `raw/streams/` starts the pipeline the moment a file lands, so there's no polling or fixed batch window.
 
-On failure at any state: EventBridge (execution status FAILED/TIMED_OUT/ABORTED) -> SNS -> email
+```mermaid
+flowchart TD
+    B[(S3 · raw/streams/)] -->|Object Created| C{{EventBridge}} --> D[Step Functions]
+
+    subgraph SFN [Orchestration]
+        direction TB
+        V[Validate] --> T[Transform] --> L[Load] --> A[Archive]
+    end
+
+    D --> V
+    T --> P[(S3 · processed/)]
+    L --> DB[(DynamoDB)]
+    A --> ARC[(S3 · archive/)]
 ```
 
----
+A Step Functions state machine runs the steps in order, retrying a step if it fails.
 
-## Features
+| # | Step | Runs on | Purpose |
+| - | ---- | ------- | ------- |
+| 1 | AcquireLock | DynamoDB | Acquires a lock so only one run executes at a time |
+| 2 | ValidateInputs | Glue Python Shell | Confirms each file has its required columns; stops early otherwise |
+| 3 | TransformKPIs | Glue PySpark | Cleans the data, appends it to the event store, and recomputes the KPIs |
+| 4 | LoadDynamoDB | Glue Python Shell | Writes the KPIs to DynamoDB |
+| 5 | ArchiveProcessedFiles | Lambda | Moves the processed files to `archive/` |
+| 6 | ReleaseLock | DynamoDB | Releases the lock |
 
-* Infrastructure as Code (Terraform)
-* Event-driven trigger: new files in `raw/streams/` start the pipeline automatically via EventBridge, no polling or fixed schedule
-* Automated ETL orchestration with Step Functions
-* Data validation using AWS Glue Python Shell
-* KPI computation using AWS Glue PySpark
-* DynamoDB storage for analytical queries
-* Automated archival of processed files
-* SNS email alerting on pipeline failure
-* CloudWatch logging
-* IAM roles and least privilege policies
-* Sample datasets included
+The lock is released on both the success and failure paths, so a failed run never leaves it held.
 
 ---
 
-## AWS Resources Created
+## Input data
 
-### Amazon S3
+Required columns per file:
 
-Creates a private bucket with the following structure:
-
-```
-raw/
-├── reference/
-│   ├── songs.csv
-│   └── users.csv
-└── streams/
-    ├── streams1.csv
-    ├── streams2.csv
-    └── streams3.csv
-
-processed/
-├── events/              # cumulative cleaned stream events (parquet, partitioned by source file)
-├── genre_daily_kpis/    # recomputed KPI output loaded into DynamoDB
-├── top_songs/
-└── top_genres/
-archive/                 # processed stream files moved here per execution
-scripts/                 # Glue job scripts
-tmp/                     # Glue temp/spill
-```
+| File | Required columns |
+| ---- | ---------------- |
+| `songs.csv` | `track_id`, `track_name`, `duration_ms`, `track_genre` |
+| `users.csv` | `user_id`, `user_name`, `user_age`, `user_country`, `created_at` |
+| `streams.csv` | `user_id`, `track_id`, `listen_time` |
 
 ---
 
-### AWS Glue Jobs
+## KPIs
 
-| Job             | Purpose                    |
-| --------------- | -------------------------- |
-| Validate Inputs | Validate incoming datasets |
-| Transform KPIs  | Compute daily metrics      |
-| Load DynamoDB   | Load processed results     |
+Computed daily, per genre:
 
----
+- **Listen count** — total plays for the genre
+- **Unique listeners** — distinct users who played it
+- **Total listening time** — summed track duration
+- **Average listening time per user** — total time divided by unique listeners
+- **Top 3 songs** in the genre
+- **Top 5 genres** overall
 
-### DynamoDB Tables
-
-| Table            | Description                                             |
-| ---------------- | -------------------------------------------------------- |
-| genre_daily_kpis | Daily genre statistics                                    |
-| top_songs        | Top N songs per genre per day (`top_n_songs`, default 3)  |
-| top_genres       | Top N genres per day (`top_n_genres`, default 5)          |
-| pipeline_lock    | Single-writer lock that serializes pipeline executions    |
+A single day's data can arrive across several files. To keep the daily figures correct, the transform job maintains a cumulative store of cleaned events and recomputes the metrics from the full store on every run, so a later file adds to the day's totals rather than overwriting them. Events are partitioned by source file, so reprocessing a file replaces only its own slice instead of double-counting.
 
 ---
 
-### Step Functions Workflow
+## Data model
 
-The pipeline executes the following stages:
+The tables are keyed around their read patterns, so every lookup is a single-key read with no table scans.
 
-1. AcquireLock — takes a single-writer lock so runs never overlap (see [Concurrency Control](#concurrency-control))
-2. ValidateInputs
-3. TransformKPIs
-4. LoadDynamoDB
-5. ArchiveProcessedFiles
-6. ReleaseLock — releases the lock on both success and failure paths
-
----
-
-### Trigger
-
-An S3 EventBridge notification fires an `Object Created` event whenever a file lands under `raw/streams/`. An EventBridge rule matches that event and starts the Step Functions execution directly — no manual invocation or polling required.
-
-### Alerting
-
-A second EventBridge rule watches the state machine's execution status. If an execution reaches `FAILED`, `TIMED_OUT`, or `ABORTED`, it publishes to the `<project_name>-alerts` SNS topic. Set `alert_email` in `terraform.tfvars` to subscribe an inbox (subscription must be confirmed via the email AWS sends).
+| Table | Partition key | Sort key | Serves |
+| ----- | ------------- | -------- | ------ |
+| `genre-daily-kpis` | `date_genre` (e.g. `2024-06-25#romance`) | — | a genre's metrics for a given day |
+| `top-songs-per-genre-daily` | `date_genre` | `rank` | the top 3 songs for a genre on a day |
+| `top-genres-daily` | `listen_date` | `rank` | the top 5 genres for a day |
 
 ---
 
-## Daily KPIs Computed
-
-### Genre-Level KPIs
-
-* Listen Count
-* Unique Listeners
-* Total Listening Time
-* Average Listening Time per User
-* Top 3 Songs per Genre per Day
-* Top 5 Genres per Day
-
-**Total Listening Time** is the sum of each played track's full `duration_ms` (the `streams` schema carries only a `listen_time` timestamp, not an actual play length), and **Average Listening Time per User** is that total divided by the day's unique listeners.
-
-**Multi-batch correctness:** the transform job appends every cleaned batch into a cumulative, partitioned event store under `processed/events/` and recomputes KPIs across the *full* history each run. So when a single day's data arrives across several batches, unique listeners and the top-N rankings stay correct instead of being overwritten by the latest batch alone. Event partitions are keyed by source file, so a reprocessed file replaces its own partition rather than double-counting.
-
----
-
-## Input Data Schema
-
-### songs.csv
-
-```text
-track_id
-track_name
-duration_ms
-track_genre
-```
-
-### users.csv
-
-```text
-user_id
-user_name
-user_age
-user_country
-created_at
-```
-
-### streams.csv
-
-```text
-user_id
-track_id
-listen_time
-```
-
----
-
-## Project Structure
-
-One file per concern, so a reviewer can find any resource type without scanning a monolith:
+## Project layout
 
 ```
 music-streaming-etl-terraform/
-│
-├── data/                # sample songs/users/streams CSVs
-├── examples/            # sample Step Functions start-execution payload
-├── glue_scripts/        # validate_inputs.py, transform_kpis.py, load_to_dynamodb.py
-├── lambda/              # archive_files.py
-│
-├── locals.tf            # shared naming/prefix locals - single source of truth
-├── s3.tf                # data lake bucket, encryption, versioning, script/sample uploads
-├── dynamodb.tf           # genre_daily_kpis / top_songs / top_genres tables
-├── glue.tf              # validate / transform / load Glue jobs
-├── iam.tf                # roles + least-privilege inline policies
-├── lambda.tf             # archive Lambda function
-├── step_functions.tf    # orchestration state machine
-├── triggers.tf           # S3 -> EventBridge -> Step Functions auto-trigger
-├── alerting.tf           # SNS + EventBridge failure alerting
-├── logging.tf            # CloudWatch log groups
-│
-├── variables.tf
-├── outputs.tf
-├── providers.tf
-├── versions.tf
+├── .github/workflows/terraform.yml   # the CI/CD workflow
+├── bootstrap/                        # one-time setup: state bucket, lock table, OIDC, CI role
+├── data/                             # sample CSVs
+├── examples/                         # sample start-execution payload
+├── glue_scripts/                     # validate / transform / load
+├── lambda/                           # archive_files.py
+├── tests/                            # unit tests
+├── locals.tf                         # names and prefixes, defined once
+├── s3.tf  dynamodb.tf  glue.tf  iam.tf  lambda.tf
+├── step_functions.tf  triggers.tf  alerting.tf  logging.tf
+├── backend.tf  backend.hcl           # S3 remote state
+├── variables.tf  outputs.tf  providers.tf  versions.tf
+├── pytest.ini  requirements-dev.txt  .tflint.hcl  .checkov.yaml
 └── README.md
 ```
 
-No resource name, S3 prefix, or output-folder name is duplicated as an independent literal across files — `locals.tf` defines each one once, and both Terraform and the Glue/Lambda scripts consume it via job arguments (`--genre_kpis_prefix`, `--top_songs_prefix`, `--top_genres_prefix`, `--required_columns`, `--top_n_songs`, `--top_n_genres`).
-
 ---
 
-## Prerequisites
+## Getting started
 
-* Terraform >= 1.4
-* AWS CLI
-* AWS Account
-* IAM User with AdministratorAccess (for lab purposes)
-
----
-
-## AWS CLI Configuration
+Requirements: Terraform 1.5+, the AWS CLI authenticated to `eu-west-1`, an account with permission to create these resources, and Python 3.11 to run the tests.
 
 ```bash
-aws configure
-```
+cp terraform.tfvars.example terraform.tfvars   # set alert_email to receive failure emails
 
-Provide:
-
-```text
-AWS Access Key ID
-AWS Secret Access Key
-Default region: us-east-1
-Default output format: json
-```
-
-Verify:
-
-```bash
-aws sts get-caller-identity
-```
-
----
-
-## Deployment
-
-Navigate to the repository:
-
-```bash
-cd music-streaming-etl-terraform
-```
-
-Create variables file:
-
-```bash
-cp terraform.tfvars.example terraform.tfvars
-```
-
-Deploy:
-
-```bash
 terraform init
-terraform fmt
 terraform validate
 terraform plan
 terraform apply
 ```
 
----
+Configurable variables (`terraform.tfvars`):
 
-## Configuration
-
-Key variables in `terraform.tfvars` (see `terraform.tfvars.example` for the full list):
-
-| Variable                 | Default              | Purpose                                              |
-| ------------------------ | -------------------- | ----------------------------------------------------- |
-| `top_n_songs`             | `3`                  | Songs ranked per genre per day                        |
-| `top_n_genres`            | `5`                  | Genres ranked per day                                  |
-| `alert_email`             | `null`               | Subscribes an inbox to pipeline-failure SNS alerts     |
-| `glue_worker_type`        | `"G.1X"`             | Worker type for the PySpark transform job              |
-| `glue_number_of_workers`  | `2`                  | Worker count for the PySpark transform job              |
-| `upload_sample_data`      | `true`               | Whether to seed `raw/` with the sample CSVs on apply    |
-
-None of these are hardcoded in the Glue/Lambda scripts — they're resolved in Terraform and passed down as `default_arguments` / environment variables, so changing a ranking size or worker count never requires touching Python.
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `top_n_songs` | `3` | top songs per genre per day |
+| `top_n_genres` | `5` | top genres per day |
+| `alert_email` | `null` | address for failure alerts |
+| `glue_worker_type` | `G.1X` | PySpark worker type |
+| `glue_number_of_workers` | `2` | PySpark worker count |
+| `upload_sample_data` | `true` | seed `raw/` with the sample CSVs on apply |
 
 ---
 
-## Run the Pipeline
+## Running the pipeline
 
-Once deployed, dropping a stream CSV into `raw/streams/` (e.g. `aws s3 cp streams4.csv s3://$(terraform output -raw s3_bucket)/raw/streams/`) triggers the pipeline automatically via EventBridge — no manual step required.
+With `upload_sample_data = true`, the first apply seeds the data and the pipeline runs automatically. To process new data, upload a file:
 
-To start a run manually (useful for backfills or re-running after fixing bad data), use:
+```bash
+aws s3 cp streams4.csv s3://$(terraform output -raw s3_bucket)/raw/streams/
+```
+
+A run can also be started manually (useful for backfills or reruns):
 
 ```bash
 aws stepfunctions start-execution \
---state-machine-arn $(terraform output -raw state_machine_arn) \
---input file://examples/start-execution.json
+  --state-machine-arn $(terraform output -raw state_machine_arn) \
+  --input file://examples/start-execution.json
 ```
 
 ---
 
-## Sample DynamoDB Queries
-
-### Daily Genre KPIs
+## Querying results
 
 ```bash
+# one genre's KPIs for a day
 aws dynamodb get-item \
---table-name music-streaming-etl-genre-daily-kpis \
---key '{"date_genre":{"S":"2024-06-25#acoustic"}}'
-```
+  --table-name music-streaming-etl-genre-daily-kpis \
+  --key '{"date_genre":{"S":"2024-06-25#acoustic"}}'
 
-### Top Songs
-
-```bash
+# top 3 songs in a genre that day
 aws dynamodb query \
---table-name music-streaming-etl-top-songs-per-genre-daily \
---key-condition-expression "date_genre = :dg" \
---expression-attribute-values '{":dg":{"S":"2024-06-25#acoustic"}}'
-```
+  --table-name music-streaming-etl-top-songs-per-genre-daily \
+  --key-condition-expression "date_genre = :dg" \
+  --expression-attribute-values '{":dg":{"S":"2024-06-25#acoustic"}}'
 
-### Top Genres
-
-```bash
+# top 5 genres that day
 aws dynamodb query \
---table-name music-streaming-etl-top-genres-daily \
---key-condition-expression "listen_date = :d" \
---expression-attribute-values '{":d":{"S":"2024-06-25"}}'
+  --table-name music-streaming-etl-top-genres-daily \
+  --key-condition-expression "listen_date = :d" \
+  --expression-attribute-values '{":d":{"S":"2024-06-25"}}'
 ```
 
 ---
 
-## Logging and Monitoring
+## Tests
 
-* AWS CloudWatch Logs
-* AWS Step Functions Execution History
-* AWS Glue Job Monitoring
-* Lambda Execution Logs
+The Python logic is unit-tested, so it can be verified without AWS or Spark:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+- `tests/test_validate_inputs.py` — the required-column check
+- `tests/test_load_to_dynamodb.py` — float-to-`Decimal` coercion before writing to DynamoDB
+- `tests/test_archive_files.py` — the archive move logic (copy-then-delete, skips directory markers)
+
+The PySpark job is not unit-tested (it needs the Glue runtime); it is exercised end to end when the pipeline runs.
 
 ---
 
-## Concurrency Control
+## CI/CD
 
-Each execution reprocesses everything currently under `raw/streams/`, then archives it, so two overlapping executions would race over the same files. The state machine guards against this with a DynamoDB semaphore:
+Terraform owns the infrastructure and a single [terraform.yml](.github/workflows/terraform.yml) workflow runs it. State is held in S3 with DynamoDB locking, so CI and local runs share the same state.
 
-* **`AcquireLock`** — a conditional `PutItem` (`attribute_not_exists(LockName)`) against the `pipeline-lock` table. Only one execution can hold the `"pipeline"` lock item at a time.
-* If a second stream file lands while a run is in flight, its execution's `AcquireLock` hits `ConditionalCheckFailedException` and **retries with exponential backoff** (up to ~30+ min, covering the Glue transform timeout) until the first run releases the lock, then processes whatever files remain.
-* **`ReleaseLock`** deletes the lock item on the success path; **`ReleaseLockOnFailure`** does the same on every failure path before ending in `Fail`, so a failed run never leaves the lock held.
+- On a **pull request**: the checks (`pytest`, `terraform fmt`, `tflint`, Checkov) and a `plan`.
+- From the **Run workflow** button: `plan`, `apply`, or `destroy`. Apply and destroy require approval through the `production` environment.
 
-**Residual edge case:** if an execution is force-aborted (so neither release state runs), the lock item persists and later runs will wait, then fail (triggering the failure alert). Recover by deleting the stuck item:
+**Credentials.** The workflow authenticates with short-lived keys stored as GitHub secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), which is what works in the DCE sandbox I built this against. On a persistent account I would use OIDC instead (no stored keys); the `bootstrap/` config already provisions the OIDC provider and CI role, so it only requires switching the auth step to `role-to-assume: ${{ vars.AWS_ROLE_ARN }}`.
+
+Setup is a one-time step. `bootstrap/` creates the state bucket, lock table, OIDC provider, and CI role:
+
+```bash
+cd bootstrap && terraform init && terraform apply     # note the outputs
+cd .. && terraform init -backend-config=backend.hcl -migrate-state
+```
+
+Then, under *Settings → Secrets and variables → Actions*, add the AWS credential secrets (or an `AWS_ROLE_ARN` variable for OIDC) and create a `production` environment with a required reviewer.
+
+---
+
+## Operations
+
+**Concurrency.** A run reprocesses everything in `raw/streams/` and then archives it, so the lock prevents overlapping runs. If a run is force-cancelled and leaves the lock in place, remove it manually:
 
 ```bash
 aws dynamodb delete-item \
   --table-name music-streaming-etl-pipeline-lock \
-  --key '{"LockName": {"S": "pipeline"}}'
+  --key '{"LockName":{"S":"pipeline"}}'
 ```
 
----
+**Monitoring.** Glue and Lambda log to CloudWatch, Step Functions retains the full execution history, and any failed, timed-out, or aborted run sends an email via SNS (when `alert_email` is set).
 
-## CI/CD (GitHub Actions)
+**Security.** Data is encrypted at rest (S3, DynamoDB, SNS), the bucket has versioning and blocks public access, and each service has its own least-privilege role. The KPI tables have point-in-time recovery enabled, and there are no long-lived credentials in the design. For the Checkov findings from the CI scan, I fixed the ones worth addressing and documented the exceptions, with reasons, in [.checkov.yaml](.checkov.yaml).
 
-Infrastructure is managed by **Terraform**; **GitHub Actions** runs it. State is stored remotely in S3 with DynamoDB locking so CI and local runs share one source of truth.
-
-```
-bootstrap/  ── run once, locally ──►  S3 state bucket + DynamoDB lock + GitHub OIDC provider + CI role
-     │
-     ▼
-main config  ──►  backend "s3"  ◄── Actions assume the CI role via OIDC (no stored keys)
-                         │
-   Pull request ─────────┼──►  ci.yml : fmt → validate → plan (plan posted as PR comment)
-   Merge to main ────────┴──►  cd.yml : apply  (paused by the `production` environment gate)
-```
-
-### One-time setup
-
-1. **Create the backend + CI role** (uses local state, run once):
-   ```bash
-   cd bootstrap
-   cp terraform.tfvars.example terraform.tfvars   # set github_repository = "owner/repo"
-   terraform init
-   terraform apply
-   ```
-   Note the three outputs: `state_bucket`, `lock_table`, `ci_role_arn`.
-
-2. **Point the backend at those names** — edit [backend.hcl](backend.hcl) so `bucket` and `dynamodb_table` match the `state_bucket` / `lock_table` outputs (already pre-filled for this account).
-
-3. **Migrate existing local state into S3** (from the repo root):
-   ```bash
-   terraform init -backend-config=backend.hcl -migrate-state
-   ```
-   Answer `yes` when it offers to copy the current state — your already-deployed resources are preserved.
-
-4. **Configure GitHub** (repo *Settings*):
-   - *Secrets and variables → Actions → Variables*: add repository variable `AWS_ROLE_ARN` = the `ci_role_arn` output.
-   - *Environments*: create an environment named `production` and add yourself as a **required reviewer** (this is the approval gate before `apply`).
-
-5. **Set the Terraform version** in both workflows (`TF_VERSION`) to match your local `terraform version`, so CI reads the state file without a version-compatibility error.
-
-That's it — open a PR to see `plan`, merge to run `apply` (after approval).
-
-### No-OIDC fallback
-
-If the account can't create an IAM OIDC provider (some locked-down sandboxes), skip the OIDC parts of `bootstrap` and instead store `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN` for temporary creds) as GitHub **secrets**, then replace the `configure-aws-credentials` step's `role-to-assume` with those secrets. Less secure and needs rotation — prefer OIDC on a real account.
-
-> **DCE sandbox caveat:** a disposable sandbox recycles the account, so the state bucket, OIDC provider, and CI role won't persist between sessions, and its hourly-rotating keys make the secret fallback impractical. This CI/CD setup is built for a **persistent** AWS account; use it there.
+**Cost.** The stack is serverless and scales to zero, so an idle deployment is negligible: DynamoDB and S3 are on-demand, Glue bills only while a job runs, and the rest is minimal. There is no always-on compute.
 
 ---
 
 ## Cleanup
 
-To avoid AWS charges:
-
 ```bash
 terraform destroy
 ```
-
-Confirm by typing:
-
-```text
-yes
-```
-
----
-
-## Technologies Used
-
-* Terraform
-* Amazon S3
-* AWS Glue
-* AWS Step Functions
-* AWS Lambda
-* Amazon DynamoDB
-* Python
-* PySpark
-* AWS IAM
-* CloudWatch
-

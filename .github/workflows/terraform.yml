@@ -29,7 +29,7 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Quality gate: runs without AWS credentials, so it's fast and safe on forks.
+  # Quality gate: no AWS credentials needed, so it runs fast and on its own.
   # Unit tests, formatting, lint, and IaC security scanning.
   # ---------------------------------------------------------------------------
   quality:

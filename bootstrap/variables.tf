@@ -11,7 +11,7 @@ variable "project_name" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository allowed to assume the CI role, in 'owner/repo' form (e.g. amalitech/music-streaming-etl)."
+  description = "GitHub repository allowed to assume the CI role, in 'owner/repo' form."
   type        = string
 }
 

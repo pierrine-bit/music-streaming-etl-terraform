@@ -16,4 +16,6 @@ boto3.setup_default_session(region_name="eu-west-1")
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "glue_scripts"))
+_root = os.path.join(os.path.dirname(__file__), "..")
+sys.path.insert(0, os.path.join(_root, "glue_scripts"))
+sys.path.insert(0, os.path.join(_root, "lambda"))

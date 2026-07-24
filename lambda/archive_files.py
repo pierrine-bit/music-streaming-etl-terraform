@@ -1,8 +1,15 @@
-import boto3
+"""Archive Lambda: move processed stream files to archive/<execution_id>/."""
+import logging
 import os
 from datetime import datetime, timezone
 
-s3 = boto3.client("s3")
+import boto3
+from botocore.config import Config
+
+log = logging.getLogger()
+log.setLevel(logging.INFO)
+
+s3 = boto3.client("s3", config=Config(retries={"max_attempts": 5, "mode": "standard"}))
 
 
 def lambda_handler(event, context):
@@ -23,10 +30,10 @@ def lambda_handler(event, context):
             key = obj["Key"]
             if key.endswith("/"):
                 continue
-            relative = key[len(source_prefix):]
-            dest_key = f"{archive_prefix}{execution_id}/{relative}"
+            dest_key = f"{archive_prefix}{execution_id}/{key[len(source_prefix):]}"
             s3.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": key}, Key=dest_key)
             s3.delete_object(Bucket=bucket, Key=key)
             moved.append({"from": key, "to": dest_key})
 
+    log.info("Archived %d file(s) to %s%s/", len(moved), archive_prefix, execution_id)
     return {"moved_count": len(moved), "moved": moved}

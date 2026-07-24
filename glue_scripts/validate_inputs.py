@@ -1,3 +1,4 @@
+"""Glue Python Shell job: validate that reference and stream files have the required columns."""
 import argparse
 import csv
 import json
@@ -5,9 +6,12 @@ import logging
 from io import StringIO
 
 import boto3
+from botocore.config import Config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-s3 = boto3.client("s3")
+log = logging.getLogger(__name__)
+
+s3 = boto3.client("s3", config=Config(retries={"max_attempts": 5, "mode": "standard"}))
 
 
 def read_header(bucket: str, key: str) -> set[str]:
@@ -17,11 +21,10 @@ def read_header(bucket: str, key: str) -> set[str]:
 
 
 def validate_file(bucket: str, key: str, dataset: str, required_columns: dict) -> None:
-    header = read_header(bucket, key)
-    missing = set(required_columns[dataset]) - header
+    missing = set(required_columns[dataset]) - read_header(bucket, key)
     if missing:
         raise ValueError(f"{key} is missing required columns: {sorted(missing)}")
-    logging.info("Validated %s with columns %s", key, sorted(header))
+    log.info("Validated %s", key)
 
 
 def list_stream_files(bucket: str, prefix: str) -> list[str]:
@@ -30,10 +33,7 @@ def list_stream_files(bucket: str, prefix: str) -> list[str]:
     keys = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith(".csv"):
-                keys.append(key)
+        keys += [o["Key"] for o in page.get("Contents", []) if o["Key"].endswith(".csv")]
     return keys
 
 
@@ -43,30 +43,22 @@ def main() -> None:
     parser.add_argument("--streams_prefix", required=True)
     parser.add_argument("--songs_key", required=True)
     parser.add_argument("--users_key", required=True)
-    parser.add_argument(
-        "--required_columns",
-        required=True,
-        help="JSON object mapping dataset name (songs/users/streams) to a list of required column names",
-    )
+    parser.add_argument("--required_columns", required=True)
     args, _ = parser.parse_known_args()
 
     required_columns = json.loads(args.required_columns)
-
     validate_file(args.bucket, args.songs_key, "songs", required_columns)
     validate_file(args.bucket, args.users_key, "users", required_columns)
 
+    # No stream files means a duplicate trigger fired after a prior run archived
+    # the batch: nothing to process, so exit cleanly rather than fail.
     stream_keys = list_stream_files(args.bucket, args.streams_prefix)
     if not stream_keys:
-        # A redundant/duplicate trigger can fire after a previous run already
-        # archived the batch. There is simply nothing to process, which is not
-        # an error — exit successfully so the pipeline ends cleanly (no false
-        # failure alert). Downstream Glue jobs guard for the same empty case.
-        logging.info("No stream CSV files at s3://%s/%s; nothing to process.", args.bucket, args.streams_prefix)
+        log.info("No stream files at s3://%s/%s; nothing to process.", args.bucket, args.streams_prefix)
         return
     for key in stream_keys:
         validate_file(args.bucket, key, "streams", required_columns)
-
-    logging.info("Validation completed successfully for %d stream file(s).", len(stream_keys))
+    log.info("Validation passed for %d stream file(s).", len(stream_keys))
 
 
 if __name__ == "__main__":
