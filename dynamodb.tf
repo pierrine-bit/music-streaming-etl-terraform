@@ -8,6 +8,10 @@ resource "aws_dynamodb_table" "genre_daily_kpis" {
     type = "S"
   }
 
+  point_in_time_recovery {
+    enabled = true
+  }
+
   tags = local.common_tags
 }
 
@@ -27,10 +31,15 @@ resource "aws_dynamodb_table" "top_songs" {
     type = "N"
   }
 
+  point_in_time_recovery {
+    enabled = true
+  }
+
   tags = local.common_tags
 }
 
 resource "aws_dynamodb_table" "pipeline_lock" {
+  # checkov:skip=CKV_AWS_28:Ephemeral single-item lock — no data to back up
   name         = "${var.project_name}-pipeline-lock"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockName"
@@ -57,6 +66,10 @@ resource "aws_dynamodb_table" "top_genres" {
   attribute {
     name = "rank"
     type = "N"
+  }
+
+  point_in_time_recovery {
+    enabled = true
   }
 
   tags = local.common_tags

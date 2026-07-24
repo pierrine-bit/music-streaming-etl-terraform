@@ -65,8 +65,9 @@ jobs:
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
+          config_file: .checkov.yaml
           quiet: true
-          soft_fail: true # report findings without failing the build; triage separately
+          soft_fail: true # accepted exceptions are in .checkov.yaml; soft_fail keeps any new advisory non-blocking
 
   # ---------------------------------------------------------------------------
   # Terraform: needs AWS. Runs plan on PRs, or the chosen action on dispatch.

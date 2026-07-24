@@ -1,6 +1,7 @@
 resource "aws_sns_topic" "pipeline_alerts" {
-  name = "${var.project_name}-alerts"
-  tags = local.common_tags
+  name              = "${var.project_name}-alerts"
+  kms_master_key_id = "alias/aws/sns" # server-side encryption with the AWS-managed SNS key
+  tags              = local.common_tags
 }
 
 resource "aws_sns_topic_subscription" "pipeline_alerts_email" {

@@ -1,0 +1,15 @@
+# Checkov configuration. Findings we consciously accept are skipped here with a
+# rationale; everything else is still scanned. Per-resource exceptions (e.g.
+# point-in-time recovery on lock tables) use inline `# checkov:skip=` comments.
+skip-check:
+  # DynamoDB tables hold non-sensitive, recomputable analytical aggregates.
+  # AWS-owned encryption at rest is sufficient; a customer-managed KMS key would
+  # add cost and key management with no meaningful benefit here.
+  - CKV_AWS_119
+  # "*" resource in IAM is intentional and scoped: the GitHub Actions CI role
+  # needs broad Terraform permissions, and Glue continuous logging writes to
+  # dynamically-named CloudWatch log groups that can't be enumerated up front.
+  - CKV_AWS_356
+  # The workflow_dispatch plan/apply/destroy dropdown is a deliberate manual
+  # control for this pipeline, not an untrusted build input.
+  - CKV_GHA_7
