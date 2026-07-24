@@ -19,7 +19,6 @@ on:
     branches: [main]
 
 permissions:
-  id-token: write # assume the AWS role via OIDC
   contents: read
 
 env:
@@ -80,21 +79,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug OIDC subject
-        run: |
-          echo "repository = ${{ github.repository }}"
-          echo "ref        = ${{ github.ref }}"
-          echo "event      = ${{ github.event_name }}"
-          echo "trust expects sub = repo:${{ github.repository }}:* to match repo:pierrine-bit/music-streaming-etl-terraform:*"
-
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure AWS credentials (OIDC)
+      # OIDC is preferred on a persistent account, but the DCE sandbox blocks
+      # federated AssumeRoleWithWebIdentity, so we authenticate with the
+      # sandbox's temporary credentials (stored as GitHub secrets). These are
+      # short-lived — refresh the secrets from the DCE portal before running.
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform init
